@@ -1,0 +1,7 @@
+tables.o: tables.c /usr/include/stdc-predef.h tables.h m_fixed.h
+
+/usr/include/stdc-predef.h:
+
+tables.h:
+
+m_fixed.h:

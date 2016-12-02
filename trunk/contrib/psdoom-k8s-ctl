@@ -1,0 +1,90 @@
+#!/bin/bash
+
+#
+# Command line tool to use psdoom-ng (patched to support external commands)
+# with cloudfoundry. This is just a small proof of concept, it will show
+# all the apps in the current space as processes. 
+#
+# Kill the process in psdoom means delete the app.
+#
+#   PSDOOMPSCMD="./contrib/psdoom-cf-ctl ps" \
+#   PSDOOMRENICECMD="true" \
+#   PSDOOMKILLCMD="./contrib/psdoom-cf-ctl kill" \
+#   ./trunk/src/psdoom
+#
+
+set -e 
+
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+export CF_COLOR=false
+export PODS_CACHE_FILE=/tmp/psdoom-k8s_pods_name.txt
+export K8S_PODS_OUTPUT=/tmp/psdoom-k8s_pods_output.txt
+export TEMP_K8S_PODS_OUTPUT=/tmp/temp_psdoom-k8s_pods_output.txt
+touch $TEMP_K8S_PODS_OUTPUT
+touch $PODS_CACHE_FILE
+
+# Hacky function to get an pid per app
+get_pid_for_pod() {
+	pod=$1
+	grep -qe "^$1\$" $PODS_CACHE_FILE &> /dev/null || echo $pod >> $PODS_CACHE_FILE
+	nl $PODS_CACHE_FILE | awk "/\t$pod\$/ { print \$1 }"
+}
+get_pod_for_pid() {
+	pid=$1
+	nl $PODS_CACHE_FILE | awk "/^[ \t]*$pid\t/ { print \$2 }"
+}
+
+if [ "$1" == "ps" ]; then
+        # We use always a cached output, because it is just easier
+	[ ! -f $K8S_PODS_OUTPUT ] && touch $K8S_PODS_OUTPUT
+	
+	# The running ones are deamons, the stopped ones, are normal guys
+	if [ "$(grep foobar $TEMP_K8S_PODS_OUTPUT | wc -l)" = "2" ]; then
+		grep -v foobar $TEMP_K8S_PODS_OUTPUT > $K8S_PODS_OUTPUT
+		echo -n '' > $TEMP_K8S_PODS_OUTPUT
+	fi
+	for pod in $(cat $K8S_PODS_OUTPUT | grep -e 'pod:' | cut -f 1 -d ' '); do
+		pid=$(get_pid_for_pod $pod)
+		echo "$USER $pid $pod 1"
+	done
+	for pod in $(cat $K8S_PODS_OUTPUT | grep -e 'svc:' | cut -f 1 -d ' '); do
+		pid=$(get_pid_for_pod $pod)
+		echo "$USER $pid $pod 0"
+	done
+
+	# Refresh the cache
+
+	#hack to stop it freezing up
+
+	if ! pgrep "kubectl" > /dev/null; then
+		if [ "$(wc -l < "$TEMP_K8S_PODS_OUTPUT")" = "0" ]; then
+			export PODJSONPATH=$'{range .items[*]}pod:{@.metadata.name} {@.status.phase}\n{end}foobar\n'
+			export SVCJSONPATH=$'{range .items[*]}svc:{@.metadata.name} Running\n{end}foobar\n'
+			nohup /usr/local/bin/kubectl --context=movio-dev --namespace=mc-blue get pods --output=jsonpath="${PODJSONPATH}" >> $TEMP_K8S_PODS_OUTPUT &
+			nohup /usr/local/bin/kubectl --context=movio-dev --namespace=mc-blue get svc --output=jsonpath="${SVCJSONPATH}" >> $TEMP_K8S_PODS_OUTPUT &
+			#"${DIR}/k8s-wrapper.sh" <&- >&- 2>&- & disown
+		fi
+	fi
+
+elif [ "$1" == "kill" ]; then
+	pod=$(get_pod_for_pid $2)
+	get_pod_for_pid $2
+	if [ ! -z "$pod" ]; then 
+		# Kill pod
+		#/usr/local/bin/kubectl --context=movio-dev --namespace=mc-blue describe pod $pod > /dev/null 2>&1 &
+		case $pod in
+		pod:*)
+			p_pod=${pod#pod:}
+			/usr/local/bin/kubectl --context=movio-dev --namespace=mc-blue get pod $p_pod >> /tmp/killedpods &
+			;;
+		svc:*)
+			p_svc=${pod#svc:}
+			/usr/local/bin/kubectl --context=movio-dev --namespace=mc-blue get svc $p_svc >> /tmp/killedpods &
+			;;
+		esac
+		# And from the cache
+		sed -i "/^$pod /d" $K8S_PODS_OUTPUT 
+	fi
+fi
+
+echo $0 $@ 1>&2 
